@@ -24,13 +24,14 @@ module axi_convert_datawidth #
     parameter S_IW          = 12            , //slave.id width  
     parameter S_DW          = 128           , //slave.data width
     parameter S_KW          = S_DW/8        , //slave.wstrb width 
-    parameter S_SW          = $clog2(S_KW)  , //slave.size width
+    parameter S_SW          = 3             , //slave.size width
 
     parameter M_AW          = 64            , //master.adress width   
     parameter M_IW          = 12            , //master.id width  
     parameter M_DW          = 64            , //master.data width
     parameter M_KW          = M_DW/8        , //master.wstrb width 
-    parameter M_SW          = $clog2(M_KW)    //master.size width
+    parameter M_SW          = 3             , //master.size width
+    parameter M_BURST_LEN   = 8               //master size burst beats
 )
 (
     //axi.slave.clock&reset
@@ -131,12 +132,12 @@ module axi_convert_datawidth #
     //debug output
     input    logic                          ila_clk                 ,             
     input    logic                          ila_rstn                ,
-    output   logic[5-1:0]                   ila_fifo_nempty         ,    
-    output   logic[5-1:0]                   ila_fifo_naempty        ,        
-    output   logic[5-1:0]                   ila_fifo_nfull          ,    
-    output   logic[5-1:0]                   ila_fifo_nafull         ,    
-    output   logic[5-1:0]                   ila_fifo_underflow      ,        
-    output   logic[5-1:0]                   ila_fifo_overflow               
+    output   logic[6-1:0]                   ila_fifo_nempty         ,    
+    output   logic[6-1:0]                   ila_fifo_naempty        ,        
+    output   logic[6-1:0]                   ila_fifo_nfull          ,    
+    output   logic[6-1:0]                   ila_fifo_nafull         ,    
+    output   logic[6-1:0]                   ila_fifo_underflow      ,        
+    output   logic[6-1:0]                   ila_fifo_overflow               
 );
 // =================================================================================================
 // localparams                                                                                  
@@ -186,12 +187,15 @@ logic [DWT_LOG2-1:0]        w_cnt       ,r_cnt          ;
 if_fifo#(.DW(FIFO_AW_DW),.DP(5),.NA( 8),.NF(10),.RL(0)) if_aw_fifo();
 if_fifo#(.DW(FIFO_AR_DW),.DP(5),.NA( 8),.NF(10),.RL(0)) if_ar_fifo();
 if_fifo#(.DW(FIFO_WD_DW),.DP(7),.NA(64),.NF(10),.RL(0)) if_wd_fifo();
+if_fifo#(.DW(8         ),.DP(9),.NA( 8),.NF(10),.RL(0)) if_rl_fifo();
 if_fifo#(.DW(FIFO_RD_DW),.DP(7),.NA(64),.NF(10),.RL(0)) if_rd_fifo();
 if_fifo#(.DW(FIFO_WB_DW),.DP(5),.NA( 8),.NF(10),.RL(0)) if_wb_fifo();
+
 
 afifo_wrapper u_aw_fifo(.wclk(s_axi_aclk),.wrst(s_axi_arst),.rclk(m_axi_aclk),.rrst(m_axi_arst),.ifs_fifo(if_aw_fifo.slave));
 afifo_wrapper u_ar_fifo(.wclk(s_axi_aclk),.wrst(s_axi_arst),.rclk(m_axi_aclk),.rrst(m_axi_arst),.ifs_fifo(if_ar_fifo.slave));
 afifo_wrapper u_wd_fifo(.wclk(s_axi_aclk),.wrst(s_axi_arst),.rclk(m_axi_aclk),.rrst(m_axi_arst),.ifs_fifo(if_wd_fifo.slave));
+afifo_wrapper u_rl_fifo(.wclk(s_axi_aclk),.wrst(s_axi_arst),.rclk(s_axi_aclk),.rrst(s_axi_arst),.ifs_fifo(if_rl_fifo.slave));
 afifo_wrapper u_rd_fifo(.wclk(m_axi_aclk),.wrst(m_axi_arst),.rclk(s_axi_aclk),.rrst(s_axi_arst),.ifs_fifo(if_rd_fifo.slave));
 afifo_wrapper u_wb_fifo(.wclk(m_axi_aclk),.wrst(m_axi_arst),.rclk(s_axi_aclk),.rrst(s_axi_arst),.ifs_fifo(if_wb_fifo.slave));
 // =================================================================================================
@@ -204,15 +208,17 @@ assign m_axi_arst       =~m_axi_aresetn     ;
 // =================================================================================================
 //aw&ar
 assign s_axi_awready    = if_aw_fifo.nafull ;
-assign s_axi_arready    = if_ar_fifo.nafull ;
+assign s_axi_arready    = if_ar_fifo.nafull & if_rl_fifo.nafull;
 always@(posedge s_axi_aclk or posedge s_axi_arst)begin
     if(s_axi_arst)begin
         if_aw_fifo.wen<='b0;
         if_ar_fifo.wen<='b0;
+        if_rl_fifo.wen<='b0;
     end
     else begin
         if_aw_fifo.wen<=#U_DLY s_axi_awvalid & s_axi_awready;
         if_ar_fifo.wen<=#U_DLY s_axi_arvalid & s_axi_arready;
+        if_rl_fifo.wen<=#U_DLY s_axi_arvalid & s_axi_arready;
     end
 end
 
@@ -266,6 +272,9 @@ always@(posedge s_axi_aclk)begin
         s_axi_arqos   ,
         s_axi_arregion,
         s_mux_arsize   
+    };
+    if_rl_fifo.wdata<=#U_DLY{ 
+        s_axi_arlen   
     };
 end
 //wd
@@ -488,19 +497,16 @@ end
 // =================================================================================================
 // fifos read                                                                                 
 // =================================================================================================
-//aw&ar&wd
+//aw&wd
 assign if_aw_fifo.ren  =if_aw_fifo.nempty & (m_axi_awready |(~m_axi_awvalid));
-assign if_ar_fifo.ren  =if_ar_fifo.nempty & (m_axi_arready |(~m_axi_arvalid));
 assign if_wd_fifo.ren  =if_wd_fifo.nempty & (m_axi_wready  |(~m_axi_wvalid ));
 always@(posedge m_axi_aclk or posedge m_axi_arst)begin
     if(m_axi_arst)begin
         m_axi_awvalid   <= 'b0;
-        m_axi_arvalid   <= 'b0;
         m_axi_wvalid    <= 'b0;
     end
     else begin
         m_axi_awvalid   <=#U_DLY  (if_aw_fifo.rvld)?1'b1:(m_axi_awready)?1'b0:m_axi_awvalid;
-        m_axi_arvalid   <=#U_DLY  (if_ar_fifo.rvld)?1'b1:(m_axi_arready)?1'b0:m_axi_arvalid;
         m_axi_wvalid    <=#U_DLY  (if_wd_fifo.rvld)?1'b1:(m_axi_wready )?1'b0:m_axi_wvalid ;
     end
 end
@@ -519,6 +525,78 @@ always@(posedge m_axi_aclk)begin
             m_axi_awsize   
         }<=#U_DLY if_aw_fifo.rdata  ;
     end
+    if(if_wd_fifo.rvld)begin
+        {
+            m_axi_wlast ,
+            m_axi_wstrb ,
+            m_axi_wdata  
+        }<=#U_DLY if_wd_fifo.rdata  ;
+    end
+end
+
+//wb
+assign if_wb_fifo.ren  =if_wb_fifo.nempty & (s_axi_bready |(~s_axi_bvalid));
+always@(posedge s_axi_aclk or posedge s_axi_arst)begin
+    if(s_axi_arst)begin
+        s_axi_bvalid    <= 'b0;
+    end
+    else begin
+        s_axi_bvalid    <=#U_DLY  (if_wb_fifo.rvld)?1'b1:(s_axi_bready)?1'b0:s_axi_bvalid;
+    end
+end
+always@(posedge s_axi_aclk)begin
+    if(if_wb_fifo.rvld)begin
+        {
+            s_axi_bid  ,
+            s_axi_bresp  
+        }<=#U_DLY if_wb_fifo.rdata  ;
+    end
+end
+
+//ar split
+logic      ar_split_run;
+logic[7:0] ar_orign_len;
+logic[7:0] ar_split_len;
+logic[7:0] ar_split_len_dec;
+assign if_ar_fifo.ren   =if_ar_fifo.nempty & m_axi_arready & (~ar_split_run);
+assign ar_orign_len     =if_ar_fifo.rdata[
+                                     (
+                                        $bits(m_axi_arlock   )+
+                                        $bits(m_axi_arprot   )+
+                                        $bits(m_axi_arqos    )+
+                                        $bits(m_axi_arregion )+
+                                        $bits(m_axi_arsize   )
+                                     )
+                                     +:8];   
+assign ar_split_len_dec=ar_split_len-M_BURST_LEN;
+
+always@(posedge m_axi_aclk or posedge m_axi_arst)begin
+    if(m_axi_arst)begin
+        ar_split_run    <= 'b0;
+        ar_split_len    <= 'b0;
+        m_axi_arvalid   <= 'b0;
+    end
+    else begin
+        if(if_ar_fifo.rvld)begin
+            ar_split_run    <=#U_DLY 1'b1;
+            ar_split_len    <=#U_DLY ar_orign_len+1;
+            m_axi_arvalid   <=#U_DLY 1'b1;
+        end
+        else if(ar_split_run & m_axi_arready)begin
+            if(ar_split_len>M_BURST_LEN)begin
+                ar_split_run    <=#U_DLY 1'b1;
+                ar_split_len    <=#U_DLY ar_split_len-M_BURST_LEN;
+                m_axi_arvalid   <=#U_DLY 1'b1;
+            end
+            else begin
+                ar_split_run    <=#U_DLY 1'b0;
+                ar_split_len    <=#U_DLY  'b0;
+                m_axi_arvalid   <=#U_DLY 1'b0;
+            end
+        end
+    end
+end
+always@(posedge m_axi_aclk)begin
     if(if_ar_fifo.rvld)begin
          {
             m_axi_araddr   ,
@@ -532,45 +610,53 @@ always@(posedge m_axi_aclk)begin
             m_axi_arregion ,
             m_axi_arsize   
         }<=#U_DLY if_ar_fifo.rdata  ;
+        //split first beat
+        if(ar_orign_len>M_BURST_LEN)begin
+            m_axi_arlen<=#U_DLY M_BURST_LEN-1;
+        end
     end
-    if(if_wd_fifo.rvld)begin
-        {
-            m_axi_wlast ,
-            m_axi_wstrb ,
-            m_axi_wdata  
-        }<=#U_DLY if_wd_fifo.rdata  ;
+    else if(ar_split_run & m_axi_arready)begin
+        m_axi_arlen<=#U_DLY (ar_split_len_dec>M_BURST_LEN)?(M_BURST_LEN-1):(ar_split_len_dec-1);
+        m_axi_araddr<=#U_DLY m_axi_araddr+M_BURST_LEN*M_KW;
     end
 end
-//ar&wb
-assign if_rd_fifo.ren  =if_rd_fifo.nempty & (s_axi_rready |(~m_axi_rvalid));
-assign if_wb_fifo.ren  =if_wb_fifo.nempty & (s_axi_bready |(~m_axi_bvalid));
+
+//r
+assign if_rd_fifo.ren  =if_rd_fifo.nempty & (s_axi_rready |(~s_axi_rvalid));
+assign if_rl_fifo.ren  =s_axi_rvalid & s_axi_rready & s_axi_rlast;
 always@(posedge s_axi_aclk or posedge s_axi_arst)begin
     if(s_axi_arst)begin
         s_axi_rvalid    <= 'b0;
-        s_axi_bvalid    <= 'b0;
     end
     else begin
         s_axi_rvalid    <=#U_DLY  (if_rd_fifo.rvld)?1'b1:(s_axi_rready)?1'b0:s_axi_rvalid;
-        s_axi_bvalid    <=#U_DLY  (if_wb_fifo.rvld)?1'b1:(s_axi_bready)?1'b0:s_axi_bvalid;
     end
 end
+logic      s_axi_rlast_r;
+logic [7:0]s_axi_rcnt;
+always@(posedge s_axi_aclk or posedge s_axi_arst)begin
+    if(s_axi_arst)begin
+        s_axi_rcnt      <= 'b0;
+    end
+    else begin
+        if(s_axi_rvalid & s_axi_rready & s_axi_rlast)
+            s_axi_rcnt<=#U_DLY 'b0;
+        else if(s_axi_rvalid & s_axi_rready)    
+            s_axi_rcnt<=#U_DLY s_axi_rcnt+1'b1;
+    end
+end
+
 always@(posedge s_axi_aclk)begin
     if(if_rd_fifo.rvld)begin
         {
             s_axi_rid      ,
             s_axi_rresp    ,
-            s_axi_rlast    ,
+            s_axi_rlast_r  ,
             s_axi_rdata   
         }<=#U_DLY if_rd_fifo.rdata  ;
     end
-    if(if_wb_fifo.rvld)begin
-        {
-            s_axi_bid  ,
-            s_axi_bresp  
-        }<=#U_DLY if_wb_fifo.rdata  ;
-    end
 end
-
+assign s_axi_rlast=s_axi_rlast_r & s_axi_rcnt==if_rl_fifo.rdata;
 // =================================================================================================
 // debug output                                                                                
 // =================================================================================================
@@ -589,6 +675,7 @@ always@(posedge ila_clk or posedge ila_rst)begin
         ila_fifo_nempty   <={
             if_aw_fifo.nempty,
             if_ar_fifo.nempty,
+            if_rl_fifo.nempty,
             if_wd_fifo.nempty,
             if_rd_fifo.nempty,
             if_wb_fifo.nempty
@@ -596,6 +683,7 @@ always@(posedge ila_clk or posedge ila_rst)begin
         ila_fifo_naempty   <={
             if_aw_fifo.naempty,
             if_ar_fifo.naempty,
+            if_rl_fifo.naempty,
             if_wd_fifo.naempty,
             if_rd_fifo.naempty,
             if_wb_fifo.naempty
@@ -603,6 +691,7 @@ always@(posedge ila_clk or posedge ila_rst)begin
         ila_fifo_nfull   <={
             if_aw_fifo.nfull,
             if_ar_fifo.nfull,
+            if_rl_fifo.nfull,
             if_wd_fifo.nfull,
             if_rd_fifo.nfull,
             if_wb_fifo.nfull
@@ -610,6 +699,7 @@ always@(posedge ila_clk or posedge ila_rst)begin
         ila_fifo_nafull   <={
             if_aw_fifo.nafull,
             if_ar_fifo.nafull,
+            if_rl_fifo.nafull,
             if_wd_fifo.nafull,
             if_rd_fifo.nafull,
             if_wb_fifo.nafull
@@ -617,6 +707,7 @@ always@(posedge ila_clk or posedge ila_rst)begin
         ila_fifo_underflow   <={
             if_aw_fifo.underflow,
             if_ar_fifo.underflow,
+            if_rl_fifo.underflow,
             if_wd_fifo.underflow,
             if_rd_fifo.underflow,
             if_wb_fifo.underflow
@@ -624,6 +715,7 @@ always@(posedge ila_clk or posedge ila_rst)begin
         ila_fifo_overflow   <={
             if_aw_fifo.overflow,
             if_ar_fifo.overflow,
+            if_rl_fifo.overflow,
             if_wd_fifo.overflow,
             if_rd_fifo.overflow,
             if_wb_fifo.overflow
